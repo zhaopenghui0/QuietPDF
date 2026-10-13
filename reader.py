@@ -13,7 +13,7 @@ import pymupdf as fitz
 from PIL import Image, ImageTk
 from tkinterdnd2 import COPY, DND_FILES, REFUSE_DROP, TkinterDnD
 
-from reader_core import Library, document_key, export_pdf, hit_stroke, new_stroke, render_page
+from reader_core import Library, document_key, export_pdf, hit_stroke, new_stroke, render_page, erase_stroke
 from continuous_view import ContinuousView
 
 BASE = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
@@ -41,6 +41,9 @@ class Reader(ContinuousView):
         self.render_job = self.save_job = None
         self.drop_job = None
         self.space_held = False
+        self.alt_held = False
+        self.eraser_previous = None
+        self.eraser_before, self.eraser_after = {}, {}
         self.left_held = False
         self.drag_cancelled = False
         self.toolbar_visible = False
@@ -79,6 +82,9 @@ class Reader(ContinuousView):
         root.bind('<KeyPress>', self.shortcut)
         root.bind('<KeyPress-space>', self.space_down)
         root.bind('<KeyRelease-space>', self.space_up)
+        for key in ('Alt_L', 'Alt_R'):
+            root.bind(f'<KeyPress-{key}>', self.alt_down)
+            root.bind(f'<KeyRelease-{key}>', self.alt_up)
         self._welcome()
 
     def _build_ui(self):
@@ -153,7 +159,7 @@ class Reader(ContinuousView):
         self.footer = footer
         footer.pack(fill='x')
         ttk.Label(footer, textvariable=self.status, foreground='#536176').pack(side='left')
-        ttk.Label(footer, text='空格 + 左键拖动标注   ·   PgUp / PgDn 翻页', foreground='#7d899a').pack(side='right')
+        ttk.Label(footer, text='空格 + 左键标注 · Alt + 左键擦除 · Ctrl+Z 撤销', foreground='#7d899a').pack(side='right')
         self.annotation_button = ttk.Button(self.root, text='标注 ▾', command=self.toggle_toolbar)
         self.annotation_button.place(relx=1, x=-26, y=12, anchor='ne')
         self.annotation_button.lift()
@@ -192,6 +198,7 @@ class Reader(ContinuousView):
             self.bottom_panel.place_forget()
 
     def toggle_toolbar(self):
+        self.alt_up()
         self.space_up()
         if self.toolbar_visible:
             self.hide_toolbar()
@@ -228,6 +235,8 @@ class Reader(ContinuousView):
         self.toolbar_hide_job = self.root.after(220, check_pointer)
 
     def space_down(self, event):
+        if self.alt_held:
+            return 'break'
         if event.widget not in (self.canvas, self.root) or not self.doc:
             return
         if self.space_held:
@@ -265,6 +274,7 @@ class Reader(ContinuousView):
         return 'break'
 
     def cancel_pointer(self, event=None):
+        self.alt_up()
         self.space_up()
         self.finish_stroke()
         self.left_held = False
@@ -276,6 +286,9 @@ class Reader(ContinuousView):
         self.segment_start = point
 
     def space_motion(self, event):
+        if self.alt_held:
+            self.show_eraser(event)
+            return 'break'
         if not self.space_held or not self.left_held or self.drag_cancelled or not self.doc:
             return
         point = self.canvas_point(event)
@@ -288,6 +301,8 @@ class Reader(ContinuousView):
         return 'break'
 
     def leave_page(self, event):
+        self.canvas.delete('eraser-cursor')
+        self.eraser_previous = None
         if self.space_held:
             self.finish_stroke()
 
@@ -337,6 +352,7 @@ class Reader(ContinuousView):
         return COPY
 
     def open_document(self, path):
+        self.alt_up()
         self.stop_scroll()
         self.space_up()
         self.finish_stroke()
@@ -397,6 +413,8 @@ class Reader(ContinuousView):
         self.drag_cancelled = False
         if not self.doc:
             return
+        if self.alt_held:
+            return self.blackboard_erase(event)
         if self.space_held:
             return self.space_motion(event)
         if self.tool.get() == 'hand':
@@ -412,6 +430,8 @@ class Reader(ContinuousView):
     def pointer_move(self, event):
         if not self.doc or not self.left_held or self.drag_cancelled:
             return
+        if self.alt_held:
+            return self.blackboard_erase(event)
         if self.space_held:
             return self.space_motion(event)
         if self.tool.get() == 'hand':
@@ -440,8 +460,9 @@ class Reader(ContinuousView):
         self.segment_start = point
 
     def pointer_up(self, event):
-        if self.points:
+        if self.points or self.alt_held:
             self.pointer_move(event)
+        self.finish_erase()
         self.finish_stroke()
         self.left_held = False
         self.drag_cancelled = False
@@ -482,6 +503,88 @@ class Reader(ContinuousView):
                 self.status.set('已擦除一整笔 · Ctrl+Z 可撤销')
                 break
 
+    def alt_down(self, event):
+        if event.widget not in (self.canvas, self.root) or not self.doc:
+            return
+        if self.alt_held:
+            return 'break'
+        self.space_up()
+        self.finish_stroke()
+        if self.points:
+            return 'break'
+        self.stop_scroll()
+        self.hide_toolbar()
+        self.alt_held = True
+        self.eraser_previous = None
+        self.canvas.configure(cursor='circle')
+        self.status.set('黑板擦 · Alt + 左键拖动擦除局部笔迹 · Ctrl+Z 撤销')
+        return 'break'
+
+    def alt_up(self, event=None):
+        if not self.alt_held:
+            return
+        self.finish_erase()
+        self.alt_held = False
+        self.drag_cancelled = self.left_held
+        self.canvas.delete('eraser-cursor')
+        self.canvas.configure(cursor={'hand': 'hand2', 'pen': 'crosshair', 'erase': 'circle'}[self.tool.get()])
+        return 'break'
+
+    def show_eraser(self, event):
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        self.canvas.delete('eraser-cursor')
+        self.canvas.create_oval(x-14, y-14, x+14, y+14, outline='#536176',
+                                width=2, tags='eraser-cursor')
+
+    def blackboard_erase(self, event):
+        self.show_eraser(event)
+        if not self.show_ink.get():
+            return 'break'
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        start = self.eraser_previous or (x, y)
+        removed, added = [], []
+        # Use document coordinates so fast drags across page boundaries stay continuous.
+        for page in self.layout.visible(min(start[1], y)-32, abs(y-start[1])+64):
+            geom = self.layout.pages[page]
+            if page not in self.page_strokes:
+                self.page_strokes[page] = self.library.strokes(self.key, page)
+            strokes = self.page_strokes[page]
+            a = (start[0]-geom['x'], start[1]-geom['y'])
+            b = (x-geom['x'], y-geom['y'])
+            for stroke in strokes:
+                parts = erase_stroke(stroke, a, b, geom['width'], geom['height'],
+                                     14+stroke['width']*geom['scale']/2)
+                if parts is not None:
+                    removed.append(stroke)
+                    added.extend(parts)
+        if removed:
+            try:
+                self.library.replace_strokes(self.key, removed, added)
+            except Exception as error:
+                messagebox.showerror('擦除失败', str(error), parent=self.root)
+                return 'break'
+            for stroke in removed:
+                if stroke['id'] in self.eraser_after:
+                    del self.eraser_after[stroke['id']]
+                else:
+                    self.eraser_before[stroke['id']] = stroke
+            self.eraser_after.update((s['id'], s) for s in added)
+            for page in {s['page'] for s in removed}:
+                self.page_strokes[page] = self.library.strokes(self.key, page)
+            self.strokes = self.page_strokes[self.page]
+            self.draw_strokes()
+            self.canvas.tag_raise('eraser-cursor')
+        self.eraser_previous = (x, y)
+        return 'break'
+
+    def finish_erase(self):
+        if self.eraser_before:
+            self.record('replace', dict(before=list(self.eraser_before.values()),
+                                        after=list(self.eraser_after.values())))
+            self.status.set('已擦除局部笔迹 · Ctrl+Z 可撤销本次擦除')
+        self.eraser_before, self.eraser_after = {}, {}
+        self.eraser_previous = None
+
     def record(self, operation, stroke):
         self.undo_stack.append((operation, stroke))
         self.undo_stack = self.undo_stack[-100:]
@@ -489,16 +592,33 @@ class Reader(ContinuousView):
         self.history_buttons()
 
     def undo(self):
+        self.finish_erase()
         self.finish_stroke()
         self.replay(self.undo_stack, self.redo_stack, reverse=True)
 
     def redo(self):
+        self.finish_erase()
         self.replay(self.redo_stack, self.undo_stack, reverse=False)
 
     def replay(self, source, target, reverse):
         if not source:
             return
         operation, stroke = source[-1]
+        if operation == 'replace':
+            removed, added = (stroke['after'], stroke['before']) if reverse else (stroke['before'], stroke['after'])
+            try:
+                self.library.replace_strokes(self.key, removed, added)
+            except Exception as error:
+                messagebox.showerror('操作失败', str(error), parent=self.root)
+                return
+            target.append(source.pop())
+            for page in {s['page'] for s in removed+added}:
+                self.page_strokes[page] = self.library.strokes(self.key, page)
+            self.strokes = self.page_strokes[self.page]
+            self.draw_strokes()
+            self.history_buttons()
+            self.status.set('已撤销擦除' if reverse else '已重做擦除')
+            return
         try:
             remove = (operation == 'add') if reverse else (operation == 'remove')
             self.library.remove(stroke) if remove else self.library.put(self.key, stroke)
@@ -523,6 +643,7 @@ class Reader(ContinuousView):
             button.configure(relief='sunken' if value == color else 'flat')
 
     def set_tool(self, tool):
+        self.alt_up()
         self.space_up()
         self.finish_stroke()
         self.tool.set(tool)
@@ -547,7 +668,7 @@ class Reader(ContinuousView):
         self.schedule_save()
 
     def shortcut(self, event):
-        if self.space_held:
+        if self.space_held or self.alt_held:
             return 'break'
         if isinstance(event.widget, (ttk.Entry, ttk.Combobox, tk.Entry)):
             return
@@ -612,7 +733,7 @@ class Reader(ContinuousView):
         self.schedule_save()
 
     def wheel(self, event):
-        if not self.doc or self.points or self.space_held:
+        if not self.doc or self.points or self.space_held or self.alt_held:
             return
         if event.state & 0x4:
             current = self.scale if self.zoom == 'fit' else self.zoom
@@ -674,6 +795,7 @@ class Reader(ContinuousView):
             self.root.configure(cursor='')
 
     def close(self):
+        self.alt_up()
         self.space_up()
         self.finish_stroke()
         if self.points or not self.save_state():

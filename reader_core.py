@@ -77,6 +77,12 @@ class Library:
     def close(self):
         self.db.close()
 
+    def replace_strokes(self, key, removed, added):
+        with self.db:
+            self.db.executemany('DELETE FROM strokes WHERE id=?', [(s['id'],) for s in removed])
+            self.db.executemany('INSERT OR REPLACE INTO strokes VALUES(?,?,?,?)',
+                               [(s['id'], key, s['page'], json.dumps(s)) for s in added])
+
 
 def new_stroke(page, points, color, width):
     return dict(id=uuid.uuid4().hex, page=page, points=points, color=color, width=width)
@@ -94,6 +100,72 @@ def hit_stroke(stroke, point, width, height, radius):
     if len(points) == 1:
         return math.dist(point, points[0]) <= radius
     return any(distance_to_segment(point, a, b) <= radius for a, b in zip(points, points[1:]))
+
+
+def erase_stroke(stroke, start, end, width, height, radius):
+    """Clip a polyline against a swept circular eraser. None means unchanged."""
+    points = [(p[0]*width, p[1]*height) for p in stroke['points']]
+    if len(points) == 1:
+        return [] if distance_to_segment(points[0], start, end) <= radius else None
+    ex, ey = end[0]-start[0], end[1]-start[1]
+    length = math.hypot(ex, ey)
+    fragments, current, changed = [], [], False
+    for a, b in zip(points, points[1:]):
+        dx, dy = b[0]-a[0], b[1]-a[1]
+        squared = dx*dx+dy*dy
+        if squared < 1e-16:
+            continue
+        intervals = []
+        for center in (start, end):
+            ux, uy = a[0]-center[0], a[1]-center[1]
+            dot = ux*dx+uy*dy
+            disc = dot*dot-squared*(ux*ux+uy*uy-radius*radius)
+            if disc >= 0:
+                intervals.append((max(0, (-dot-math.sqrt(disc))/squared),
+                                  min(1, (-dot+math.sqrt(disc))/squared)))
+        if length > 1e-8:
+            # The capsule is the union of its endpoint circles and this rectangle.
+            ux, uy = ex/length, ey/length
+            lo, hi = 0., 1.
+            for value, delta, lower, upper in (
+                ((a[0]-start[0])*ux+(a[1]-start[1])*uy, dx*ux+dy*uy, 0, length),
+                (-(a[0]-start[0])*uy+(a[1]-start[1])*ux, -dx*uy+dy*ux, -radius, radius)):
+                if abs(delta) < 1e-12:
+                    if not lower <= value <= upper:
+                        hi = -1
+                else:
+                    t0, t1 = sorted(((lower-value)/delta, (upper-value)/delta))
+                    lo, hi = max(lo, t0), min(hi, t1)
+            intervals.append((lo, hi))
+        cuts = sorted((lo, hi) for lo, hi in intervals if hi-lo > 1e-10)
+        merged = []
+        for lo, hi in cuts:
+            if merged and lo <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], hi)
+            else:
+                merged.append([lo, hi])
+        changed |= bool(merged)
+        position = 0.
+        for lo, hi in merged + [[1., 1.]]:
+            if lo-position > 1e-10:
+                p = (a[0]+dx*position, a[1]+dy*position)
+                q = (a[0]+dx*lo, a[1]+dy*lo)
+                if current and math.dist(current[-1], p) > 1e-6:
+                    fragments.append(current)
+                    current = []
+                if not current:
+                    current.append(p)
+                current.append(q)
+            if hi > lo and current:
+                fragments.append(current)
+                current = []
+            position = hi
+    if current:
+        fragments.append(current)
+    if not changed:
+        return None
+    return [new_stroke(stroke['page'], [[x/width, y/height] for x, y in part],
+                       stroke['color'], stroke['width']) for part in fragments]
 
 
 def render_page(doc, page_number, zoom, viewport_width, annotations=True, pixel_limit=4_000_000):
