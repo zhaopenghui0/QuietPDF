@@ -144,12 +144,13 @@ class Reader(ContinuousView):
         self.canvas.grid(row=0, column=0, sticky='nsew')
         self.vertical = ttk.Scrollbar(area, orient='vertical', command=self.scroll_y)
         self.vertical.grid(row=0, column=1, sticky='ns')
-        horizontal = ttk.Scrollbar(area, orient='horizontal', command=self.scroll_x)
-        horizontal.grid(row=1, column=0, sticky='ew')
-        self.canvas.configure(yscrollcommand=self.on_yview, xscrollcommand=horizontal.set)
+        self.bottom_panel = ttk.Frame(self.root)
+        self.horizontal = ttk.Scrollbar(self.bottom_panel, orient='horizontal', command=self.scroll_x)
+        self.canvas.configure(yscrollcommand=self.on_yview, xscrollcommand=self.on_xview)
         area.rowconfigure(0, weight=1)
         area.columnconfigure(0, weight=1)
-        footer = ttk.Frame(self.root, padding=(16, 7))
+        footer = ttk.Frame(self.bottom_panel, padding=(16, 7))
+        self.footer = footer
         footer.pack(fill='x')
         ttk.Label(footer, textvariable=self.status, foreground='#536176').pack(side='left')
         ttk.Label(footer, text='空格 + 左键拖动标注   ·   PgUp / PgDn 翻页', foreground='#7d899a').pack(side='right')
@@ -165,8 +166,30 @@ class Reader(ContinuousView):
         self.canvas.bind('<Enter>', self.schedule_toolbar_hide)
         self.canvas.bind('<Leave>', self.leave_page)
         self.canvas.bind('<FocusOut>', self.cancel_pointer)
+        self.root.bind('<Motion>', self.update_bottom_panel, add='+')
+        self.root.bind('<Leave>', self.update_bottom_panel, add='+')
         self.select_color(self.ink_color)
         self.history_buttons()
+
+    def on_xview(self, first, last):
+        self.horizontal.set(first, last)
+        if float(last) - float(first) < 0.999999:
+            self.horizontal.pack(fill='x', before=self.footer)
+        else:
+            self.horizontal.pack_forget()
+
+    def update_bottom_panel(self, event):
+        x = event.x_root - self.root.winfo_rootx()
+        y = event.y_root - self.root.winfo_rooty()
+        height = self.root.winfo_height()
+        reveal_height = self.bottom_panel.winfo_reqheight() if self.bottom_panel.winfo_ismapped() else 10
+        if (not self.left_held and 0 <= x < self.root.winfo_width()
+                and height - reveal_height <= y < height):
+            self.bottom_panel.place(x=0, rely=1, anchor='sw', relwidth=1,
+                                    width=-self.vertical.winfo_width())
+            self.bottom_panel.lift()
+        else:
+            self.bottom_panel.place_forget()
 
     def toggle_toolbar(self):
         self.space_up()
