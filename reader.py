@@ -7,6 +7,7 @@ import multiprocessing
 from pathlib import Path
 import sys
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import pymupdf as fitz
@@ -45,6 +46,9 @@ class Reader(ContinuousView):
         self.eraser_previous = None
         self.eraser_before, self.eraser_after = {}, {}
         self.left_held = False
+        self.right_held = False
+        self.text_editor = None
+        self.save_text = None
         self.drag_cancelled = False
         self.toolbar_visible = False
         self.toolbar_hide_job = None
@@ -80,6 +84,7 @@ class Reader(ContinuousView):
         root.bind('<Next>', lambda e: self.navigate(1))
         root.bind('<Escape>', lambda e: self.set_tool('hand'))
         root.bind('<KeyPress>', self.shortcut)
+        root.bind('<F1>', lambda event: self.toggle_shortcuts())
         root.bind('<KeyPress-space>', self.space_down)
         root.bind('<KeyRelease-space>', self.space_up)
         for key in ('Alt_L', 'Alt_R'):
@@ -91,55 +96,54 @@ class Reader(ContinuousView):
         style = ttk.Style()
         style.theme_use('clam')
         style.configure('.', font=('Microsoft YaHei UI', 10), background='#f7f8fa')
-        style.configure('TButton', padding=(10, 7), background='#ffffff', borderwidth=1)
+        style.configure('TButton', padding=(6, 3), background='#ffffff', borderwidth=1)
         style.map('TButton', background=[('active', '#e9eef8')])
-        style.configure('Tool.TRadiobutton', padding=(10, 7))
+        style.configure('Tool.TRadiobutton', padding=(4, 3))
+        style.configure('Compact.TButton', font=('Microsoft YaHei UI', 9), padding=(6, 3), width=4)
         style.map('Tool.TRadiobutton', background=[('selected', '#dce8fc')])
         style.configure('Brand.TLabel', foreground='#245dcc', font=('Microsoft YaHei UI', 15, 'bold'))
         # Overlay controls never change the page geometry or the reading position.
         self.toolbar = ttk.Frame(self.root, relief='solid', borderwidth=1)
-        top = ttk.Frame(self.toolbar, padding=(16, 10))
+        top = ttk.Frame(self.toolbar, padding=(8, 6, 8, 3))
         top.pack(fill='x')
-        ttk.Label(top, text='轻阅', style='Brand.TLabel').pack(side='left', padx=(0, 20))
-        ttk.Button(top, text='打开 PDF', command=self.open_dialog).pack(side='left')
-        recent = ttk.Menubutton(top, text='最近阅读 ▾', padding=(12, 7))
+        ttk.Button(top, text='打开', style='Compact.TButton', command=self.open_dialog).pack(side='left')
+        recent = ttk.Menubutton(top, text='最近 ▾', padding=(4, 3))
         recent.pack(side='left', padx=6)
         self.recent_menu = tk.Menu(recent, tearoff=False)
         recent.configure(menu=self.recent_menu)
         self.recent_menu.configure(postcommand=self.refresh_recent)
-        ttk.Button(top, text='导出带标注 PDF', command=self.export).pack(side='right')
-        tools = ttk.Frame(self.toolbar, padding=(16, 4, 16, 10))
+        ttk.Button(top, text='导出 PDF', style='Compact.TButton', width=8, command=self.export).pack(side='right')
+        tools = ttk.Frame(self.toolbar, padding=(8, 3))
         tools.pack(fill='x')
-        for label, value in [('阅读 / 拖动  V', 'hand'), ('画笔  B', 'pen'), ('擦除整笔  E', 'erase')]:
+        for label, value in [('阅读', 'hand'), ('画笔', 'pen'), ('整笔擦', 'erase')]:
             ttk.Radiobutton(tools, text=label, value=value, variable=self.tool,
                             style='Tool.TRadiobutton', command=self.tool_changed).pack(side='left', padx=(0, 4))
-        ttk.Separator(tools, orient='vertical').pack(side='left', fill='y', padx=10)
+        ttk.Separator(tools, orient='vertical').pack(side='left', fill='y', padx=5)
         self.color_buttons = {}
         for color in ['#e24b4b', '#2563eb', '#18a078', '#e7a21b', '#242b36']:
-            button = tk.Button(tools, bg=color, activebackground=color, width=2, relief='flat',
-                               bd=2, command=lambda c=color: self.select_color(c))
-            button.pack(side='left', padx=3, ipady=2)
+            button = tk.Button(tools, bg=color, activebackground=color, width=1, height=1, font=('Microsoft YaHei UI', 8), relief='flat',
+                               bd=1, command=lambda c=color: self.select_color(c))
+            button.pack(side='left', padx=2)
             self.color_buttons[color] = button
-        ttk.Label(tools, text=' 粗细').pack(side='left', padx=(10, 2))
+        ttk.Label(tools, text=' 粗细').pack(side='left', padx=(5, 2))
         width = ttk.Combobox(tools, textvariable=self.ink_width, values=['1', '2.5', '4', '7'],
                              width=4, state='readonly')
         width.pack(side='left')
-        self.undo_button = ttk.Button(tools, text='撤销', command=self.undo)
-        self.undo_button.pack(side='left', padx=(12, 3))
-        self.redo_button = ttk.Button(tools, text='重做', command=self.redo)
+        self.undo_button = ttk.Button(top, text='撤销', style='Compact.TButton', command=self.undo)
+        self.undo_button.pack(side='left', padx=(5, 3))
+        self.redo_button = ttk.Button(top, text='重做', style='Compact.TButton', command=self.redo)
         self.redo_button.pack(side='left')
-        ttk.Checkbutton(tools, text='显示标注', variable=self.show_ink, command=self.toggle_ink).pack(side='right')
-        nav = ttk.Frame(self.toolbar, padding=(16, 7))
+        ttk.Checkbutton(top, text='显示标注', variable=self.show_ink, command=self.toggle_ink).pack(side='right')
+        nav = ttk.Frame(self.toolbar, padding=(8, 3, 8, 6))
         nav.pack(fill='x')
-        ttk.Button(nav, text='‹ 上页', command=lambda: self.navigate(-1)).pack(side='left')
+        ttk.Button(nav, text='‹', style='Compact.TButton', width=3, command=lambda: self.navigate(-1)).pack(side='left')
         self.page_entry = ttk.Entry(nav, textvariable=self.page_text, width=5, justify='center')
         self.page_entry.pack(side='left', padx=(10, 4))
         self.page_entry.bind('<Return>', lambda e: self.go_page())
         self.page_count = ttk.Label(nav, text='/ — 页')
         self.page_count.pack(side='left', padx=(0, 10))
-        ttk.Button(nav, text='下页 ›', command=lambda: self.navigate(1)).pack(side='left')
+        ttk.Button(nav, text='›', style='Compact.TButton', width=3, command=lambda: self.navigate(1)).pack(side='left')
         self.title_label = ttk.Label(nav, text='本地阅读 · 自动记忆进度', foreground='#617087')
-        self.title_label.pack(side='left', padx=20)
         zoom = ttk.Combobox(nav, textvariable=self.zoom_text, width=10, state='readonly',
                            values=['适合宽度', '50%', '75%', '100%', '125%', '150%', '200%', '300%'])
         zoom.pack(side='right')
@@ -160,12 +164,40 @@ class Reader(ContinuousView):
         footer.pack(fill='x')
         ttk.Label(footer, textvariable=self.status, foreground='#536176').pack(side='left')
         ttk.Label(footer, text='空格 + 左键标注 · Alt + 左键擦除 · Ctrl+Z 撤销', foreground='#7d899a').pack(side='right')
-        self.annotation_button = ttk.Button(self.root, text='标注 ▾', command=self.toggle_toolbar)
-        self.annotation_button.place(relx=1, x=-26, y=12, anchor='ne')
+        self.annotation_button = ttk.Button(self.root, text='标注 ▾', style='Compact.TButton', width=6, command=self.toggle_toolbar)
+        self.annotation_button.place(relx=1, x=-64, y=12, anchor='ne')
         self.annotation_button.lift()
+        self.help_button = ttk.Button(self.root, text='?', style='Compact.TButton', width=2,
+                                      command=self.toggle_shortcuts)
+        self.help_button.place(relx=1, x=-26, y=12, anchor='ne')
+        self.shortcuts_panel = ttk.Frame(self.root, padding=12, relief='solid', borderwidth=1)
+        ttk.Label(self.shortcuts_panel, text='快捷键', font=('Microsoft YaHei UI', 10, 'bold')).grid(row=0, column=0, sticky='w', pady=(0, 8))
+        ttk.Button(self.shortcuts_panel, text='×', style='Compact.TButton', width=2,
+                   command=self.shortcuts_panel.place_forget).grid(row=0, column=1, sticky='e', pady=(0, 8))
+        shortcuts = [
+            ('画线标注', '空格 + 左键拖动'),
+            ('局部擦除', 'Alt + 左键拖动'),
+            ('输入文字', '左右键同时按下'),
+            ('保存文字 / 换行', 'Enter / Shift + Enter'),
+            ('取消文字', 'Esc'),
+            ('撤销 / 重做', 'Ctrl + Z / Ctrl + Y'),
+            ('阅读 / 画笔 / 整笔擦', 'V / B / E'),
+            ('翻页', 'PgUp / PgDn'),
+            ('缩放', 'Ctrl + 鼠标滚轮'),
+            ('打开 / 保存', 'Ctrl + O / Ctrl + S'),
+            ('导出标注 PDF', 'Ctrl + Shift + S'),
+            ('显示快捷键', 'F1 或右上角 ?'),
+        ]
+        for row, (label, keys) in enumerate(shortcuts, 1):
+            ttk.Label(self.shortcuts_panel, text=label, foreground='#617087').grid(row=row, column=0, sticky='w', padx=(0, 20), pady=3)
+            ttk.Label(self.shortcuts_panel, text=keys).grid(row=row, column=1, sticky='w', pady=3)
+        ttk.Label(self.shortcuts_panel, text='画线、擦除：松开任意一个键即结束。', foreground='#617087').grid(
+            row=len(shortcuts)+1, column=0, columnspan=2, sticky='w', pady=(10, 0))
         self.canvas.bind('<ButtonPress-1>', self.pointer_down)
         self.canvas.bind('<B1-Motion>', self.pointer_move)
         self.canvas.bind('<ButtonRelease-1>', self.pointer_up)
+        self.canvas.bind('<ButtonPress-3>', self.right_down)
+        self.canvas.bind('<ButtonRelease-3>', self.right_up)
         self.canvas.bind('<MouseWheel>', self.wheel)
         self.canvas.bind('<Configure>', self.resize)
         self.canvas.bind('<Motion>', self.space_motion)
@@ -198,17 +230,27 @@ class Reader(ContinuousView):
             self.bottom_panel.place_forget()
 
     def toggle_toolbar(self):
+        self.shortcuts_panel.place_forget()
         self.alt_up()
         self.space_up()
         if self.toolbar_visible:
             self.hide_toolbar()
         else:
             self.toolbar_visible = True
-            self.toolbar.place(x=8, y=54, relwidth=1, width=-16)
+            self.toolbar.place(relx=1, x=-26, y=44, anchor='ne')
             self.toolbar.lift()
             self.annotation_button.configure(text='标注 ▴')
             self.annotation_button.lift()
         self.canvas.focus_set()
+
+    def toggle_shortcuts(self):
+        if self.shortcuts_panel.winfo_ismapped():
+            self.shortcuts_panel.place_forget()
+        else:
+            self.hide_toolbar()
+            self.shortcuts_panel.place(relx=1, x=-26, y=44, anchor='ne')
+            self.shortcuts_panel.lift()
+        return 'break'
 
     def hide_toolbar(self):
         if self.toolbar_hide_job:
@@ -278,6 +320,7 @@ class Reader(ContinuousView):
         self.space_up()
         self.finish_stroke()
         self.left_held = False
+        self.right_held = False
         self.drag_cancelled = True
 
     def begin_stroke(self, point):
@@ -352,6 +395,8 @@ class Reader(ContinuousView):
         return COPY
 
     def open_document(self, path):
+        if not self.finish_text():
+            return False
         self.alt_up()
         self.stop_scroll()
         self.space_up()
@@ -408,11 +453,15 @@ class Reader(ContinuousView):
         return 0 <= point[0] <= self.image_width and 0 <= point[1] <= self.image_height
 
     def pointer_down(self, event):
+        if not self.finish_text():
+            return 'break'
         self.canvas.focus_set()
         self.left_held = True
         self.drag_cancelled = False
         if not self.doc:
             return
+        if self.right_held or getattr(event, 'state', 0) & 0x400:
+            return self.open_text_editor(event)
         if self.alt_held:
             return self.blackboard_erase(event)
         if self.space_held:
@@ -467,6 +516,123 @@ class Reader(ContinuousView):
         self.left_held = False
         self.drag_cancelled = False
         self.schedule_save()
+
+    def right_down(self, event):
+        self.right_held = True
+        if self.left_held or getattr(event, 'state', 0) & 0x100:
+            return self.open_text_editor(event)
+        return 'break'
+
+    def right_up(self, event):
+        self.right_held = False
+        return 'break'
+
+    def open_text_editor(self, event):
+        if not self.doc or self.text_editor is not None:
+            return 'break'
+        # Discard the just-started pen dot when the second mouse button arrives.
+        if len(self.points) == 1:
+            self.points = []
+            self.stroke_page = None
+            self.canvas.delete('draft')
+        self.cancel_pointer()
+        self.stop_scroll()
+        point = self.canvas_point(event)
+        if not self.inside(point):
+            return 'break'
+        page, geom = self.page, self.layout.pages[self.page]
+        x, y = point[0]/geom['width'], point[1]/geom['height']
+        if not self.show_ink.get():
+            self.show_ink.set(True)
+            self.render()
+        font_size = 12
+        font = tkfont.Font(family='Microsoft YaHei UI', size=-max(1, round(font_size*geom['scale'])))
+        limit = max(1, min(320*geom['scale'], (1-x)*geom['width']-8))
+        text = tk.Text(self.canvas, font=font, wrap='char', undo=True, borderwidth=0,
+                       highlightthickness=0, padx=0, pady=0, background='white',
+                       foreground=self.ink_color, insertbackground=self.ink_color)
+        self.text_editor = text
+        # Keep native text/IME bindings but exclude reader-wide keyboard shortcuts.
+        text.bindtags((str(text), 'Text', 'all'))
+        window = self.canvas.create_window(geom['x']+point[0], geom['y']+point[1],
+                    window=text, anchor='nw', width=20, height=font.metrics('linespace')+4, tags='text-input')
+        def wrapped(value):
+            lines = []
+            for paragraph in value.split('\n'):
+                line = ''
+                for char in paragraph:
+                    if line and font.measure(line+char) > limit:
+                        lines.append(line)
+                        line = ''
+                    line += char
+                lines.append(line)
+            return lines
+        def resize_text(event=None):
+            if not text.edit_modified():
+                return
+            text.edit_modified(False)
+            lines = wrapped(text.get('1.0', 'end-1c'))
+            width = min(limit+4, max(20, max(font.measure(line) for line in lines)+4))
+            height = min(max(font.metrics('linespace')+4, len(lines)*font.metrics('linespace')+4),
+                         max(font.metrics('linespace')+4, (1-y)*geom['height']))
+            self.canvas.itemconfigure(window, width=width, height=height)
+        def dismiss():
+            self.text_editor = None
+            self.save_text = None
+            self.canvas.delete(window)
+            text.destroy()
+            self.left_held = self.right_held = False
+        def save(event=None):
+            if self.text_editor is not text:
+                return 'break'
+            value = text.get('1.0', 'end-1c').strip()
+            if not value:
+                dismiss()
+                return 'break'
+            # Persist explicit wrapping so PDF export and the canvas share line breaks.
+            lines = wrapped(value)
+            w = max(font.measure(line) for line in lines)+8
+            h = max(font.metrics('linespace'), font_size*geom['scale']*1.4)*len(lines)+8
+            if w > geom['width'] or h > geom['height']:
+                self.status.set('文字超出一页范围，请减少内容后保存')
+                text.focus_set()
+                return 'break'
+            box = [min(x, 1-w/geom['width']), min(y, 1-h/geom['height']), w/geom['width'], h/geom['height']]
+            stroke = new_stroke(page, [box[:2]], self.ink_color, 1)
+            stroke.update(type='text', text='\n'.join(lines), font_size=font_size, box=box)
+            try:
+                self.library.put(self.key, stroke)
+            except Exception as error:
+                self.status.set('文字保存失败：'+str(error))
+                text.focus_set()
+                return 'break'
+            self.page_strokes[page] = self.library.strokes(self.key, page)
+            self.strokes = self.page_strokes[self.page]
+            self.record('add', stroke)
+            self.show_ink.set(True)
+            self.draw_strokes()
+            self.status.set('文字标注已保存 · Ctrl+Z 撤销')
+            dismiss()
+            return 'break'
+        self.save_text = save
+        def complete(event=None):
+            save()
+            if self.text_editor is None:
+                self.canvas.focus_set()
+            return 'break'
+        text.bind('<Return>', complete)
+        text.bind('<Shift-Return>', lambda e: (text.insert('insert', '\n'), 'break')[-1])
+        text.bind('<Escape>', lambda e: (dismiss(), self.canvas.focus_set(), 'break')[-1])
+        text.bind('<Control-s>', complete)
+        text.bind('<FocusOut>', save)
+        text.bind('<<Modified>>', resize_text)
+        text.focus_set()
+        return 'break'
+
+    def finish_text(self):
+        if self.save_text is not None:
+            self.save_text()
+        return self.text_editor is None
 
     def finish_stroke(self):
         if not self.points:
@@ -795,6 +961,8 @@ class Reader(ContinuousView):
             self.root.configure(cursor='')
 
     def close(self):
+        if not self.finish_text():
+            return
         self.alt_up()
         self.space_up()
         self.finish_stroke()

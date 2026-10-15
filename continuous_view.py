@@ -6,6 +6,8 @@ from pdf_view import PageLayout, PageRenderer
 
 class ContinuousView:
     def render(self, position=None):
+        if not self.finish_text():
+            return
         if not self.doc:
             return
         if self.render_job:
@@ -174,6 +176,12 @@ class ContinuousView:
             coords = [(geom['x']+x*geom['width'], geom['y']+y*geom['height']) for x, y in stroke['points']]
             width = max(1, stroke['width']*geom['scale'])
             tags = ('ink', f'ink-{page}')
+            if stroke.get('type') == 'text':
+                x, y, w, h = stroke['box']
+                self.canvas.create_text(geom['x']+x*geom['width'], geom['y']+y*geom['height'],
+                    text=stroke['text'], anchor='nw', fill=stroke['color'],
+                    font=('Microsoft YaHei UI', -max(1, round(stroke['font_size']*geom['scale']))), tags=tags)
+                continue
             if len(coords) == 1:
                 x, y = coords[0]
                 self.canvas.create_oval(x-width/2, y-width/2, x+width/2, y+width/2,

@@ -96,6 +96,9 @@ def distance_to_segment(point, a, b):
 
 
 def hit_stroke(stroke, point, width, height, radius):
+    if stroke.get('type') == 'text':
+        x, y, w, h = stroke['box']
+        return x*width-radius <= point[0] <= (x+w)*width+radius and y*height-radius <= point[1] <= (y+h)*height+radius
     points = [(p[0] * width, p[1] * height) for p in stroke['points']]
     if len(points) == 1:
         return math.dist(point, points[0]) <= radius
@@ -104,6 +107,18 @@ def hit_stroke(stroke, point, width, height, radius):
 
 def erase_stroke(stroke, start, end, width, height, radius):
     """Clip a polyline against a swept circular eraser. None means unchanged."""
+    if stroke.get('type') == 'text':
+        x, y, w, h = stroke['box']
+        lo, hi = 0., 1.
+        for value, delta, lower, upper in ((start[0], end[0]-start[0], x*width-radius, (x+w)*width+radius),
+                                           (start[1], end[1]-start[1], y*height-radius, (y+h)*height+radius)):
+            if abs(delta) < 1e-12:
+                if not lower <= value <= upper:
+                    return None
+            else:
+                a, b = sorted(((lower-value)/delta, (upper-value)/delta))
+                lo, hi = max(lo, a), min(hi, b)
+        return [] if lo <= hi else None
     points = [(p[0]*width, p[1]*height) for p in stroke['points']]
     if len(points) == 1:
         return [] if distance_to_segment(points[0], start, end) <= radius else None
@@ -190,6 +205,15 @@ def export_pdf(doc, strokes, destination):
             for stroke in strokes:
                 page = output[stroke['page']]
                 rect = page.rect
+                if stroke.get('type') == 'text':
+                    x, y, w, h = stroke['box']
+                    box = fitz.Rect(x*rect.width, y*rect.height, (x+w)*rect.width, (y+h)*rect.height) * page.derotation_matrix
+                    color = tuple(int(stroke['color'][i:i+2], 16)/255 for i in (1, 3, 5))
+                    annotation = page.add_freetext_annot(box, stroke['text'], fontsize=stroke['font_size'],
+                        fontname='china-s', text_color=color, rotate=(360-page.rotation)%360)
+                    annotation.set_info(title='轻阅', subject='文字标注', content=stroke['text'])
+                    annotation.update()
+                    continue
                 points = [fitz.Point(x * rect.width, y * rect.height) * page.derotation_matrix
                           for x, y in stroke['points']]
                 if len(points) == 1:
