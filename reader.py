@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import multiprocessing
 from pathlib import Path
@@ -16,11 +17,12 @@ from tkinterdnd2 import COPY, DND_FILES, REFUSE_DROP, TkinterDnD
 
 from reader_core import Library, document_key, export_pdf, hit_stroke, new_stroke, render_page, erase_stroke
 from continuous_view import ContinuousView
+from content_editor import ContentEditor
 
 BASE = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
 
 
-class Reader(ContinuousView):
+class Reader(ContentEditor, ContinuousView):
     def __init__(self, root, data_dir=None):
         self.root = root
         root.title('轻阅 · PDF 阅读与手绘')
@@ -62,8 +64,10 @@ class Reader(ContinuousView):
         self.poll_job = self.refresh_job = self.scroll_job = None
         self.scroll_target = None
         self.password = ''
+        self.init_content_editor()
         self.layout_busy = False
         self.stroke_page = None
+        self.stroke_kind = 'ink'
         self.tool = tk.StringVar(value='hand')
         self.ink_color = '#e24b4b'
         self.ink_width = tk.StringVar(value='2.5')
@@ -106,48 +110,61 @@ class Reader(ContinuousView):
         self.toolbar = ttk.Frame(self.root, relief='solid', borderwidth=1)
         top = ttk.Frame(self.toolbar, padding=(8, 6, 8, 3))
         top.pack(fill='x')
-        ttk.Button(top, text='打开', style='Compact.TButton', command=self.open_dialog).pack(side='left')
+        ttk.Button(top, text='打开 PDF', style='Compact.TButton', command=self.open_dialog).pack(side='left', expand=True, fill='x')
         recent = ttk.Menubutton(top, text='最近 ▾', padding=(4, 3))
-        recent.pack(side='left', padx=6)
+        recent.pack(side='left', padx=(4, 0))
         self.recent_menu = tk.Menu(recent, tearoff=False)
         recent.configure(menu=self.recent_menu)
         self.recent_menu.configure(postcommand=self.refresh_recent)
-        ttk.Button(top, text='导出 PDF', style='Compact.TButton', width=8, command=self.export).pack(side='right')
         tools = ttk.Frame(self.toolbar, padding=(8, 3))
         tools.pack(fill='x')
-        for label, value in [('阅读', 'hand'), ('画笔', 'pen'), ('整笔擦', 'erase')]:
+        for label, value in [('阅读', 'hand'), ('编辑原文', 'content'), ('画笔', 'pen'), ('矩形', 'rect'), ('圆形', 'circle'), ('椭圆', 'ellipse'), ('整笔擦除', 'erase')]:
             ttk.Radiobutton(tools, text=label, value=value, variable=self.tool,
-                            style='Tool.TRadiobutton', command=self.tool_changed).pack(side='left', padx=(0, 4))
-        ttk.Separator(tools, orient='vertical').pack(side='left', fill='y', padx=5)
+                            style='Tool.TRadiobutton', command=self.tool_changed).pack(fill='x', pady=1)
+        ttk.Separator(tools).pack(fill='x', pady=5)
+        palette = ttk.Frame(tools)
+        palette.pack(fill='x')
         self.color_buttons = {}
         for color in ['#e24b4b', '#2563eb', '#18a078', '#e7a21b', '#242b36']:
-            button = tk.Button(tools, bg=color, activebackground=color, width=1, height=1, font=('Microsoft YaHei UI', 8), relief='flat',
+            button = tk.Button(palette, bg=color, activebackground=color, width=1, height=1, font=('Microsoft YaHei UI', 8), relief='flat',
                                bd=1, command=lambda c=color: self.select_color(c))
-            button.pack(side='left', padx=2)
+            button.pack(side='left', padx=2, expand=True, fill='x')
             self.color_buttons[color] = button
-        ttk.Label(tools, text=' 粗细').pack(side='left', padx=(5, 2))
-        width = ttk.Combobox(tools, textvariable=self.ink_width, values=['1', '2.5', '4', '7'],
+        pen_options = ttk.Frame(tools)
+        pen_options.pack(fill='x', pady=(5, 3))
+        ttk.Label(pen_options, text='粗细').pack(side='left')
+        width = ttk.Combobox(pen_options, textvariable=self.ink_width, values=['1', '2.5', '4', '7'],
                              width=4, state='readonly')
-        width.pack(side='left')
-        self.undo_button = ttk.Button(top, text='撤销', style='Compact.TButton', command=self.undo)
-        self.undo_button.pack(side='left', padx=(5, 3))
-        self.redo_button = ttk.Button(top, text='重做', style='Compact.TButton', command=self.redo)
-        self.redo_button.pack(side='left')
-        ttk.Checkbutton(top, text='显示标注', variable=self.show_ink, command=self.toggle_ink).pack(side='right')
+        width.pack(side='right')
+        history = ttk.Frame(tools)
+        history.pack(fill='x', pady=3)
+        self.undo_button = ttk.Button(history, text='撤销', style='Compact.TButton', command=self.undo)
+        self.undo_button.pack(side='left', fill='x', expand=True, padx=(0, 3))
+        self.redo_button = ttk.Button(history, text='重做', style='Compact.TButton', command=self.redo)
+        self.redo_button.pack(side='left', fill='x', expand=True)
+        ttk.Checkbutton(tools, text='显示标注', variable=self.show_ink, command=self.toggle_ink).pack(anchor='w', pady=3)
+        ttk.Separator(tools).pack(fill='x', pady=4)
         nav = ttk.Frame(self.toolbar, padding=(8, 3, 8, 6))
         nav.pack(fill='x')
-        ttk.Button(nav, text='‹', style='Compact.TButton', width=3, command=lambda: self.navigate(-1)).pack(side='left')
-        self.page_entry = ttk.Entry(nav, textvariable=self.page_text, width=5, justify='center')
-        self.page_entry.pack(side='left', padx=(10, 4))
+        pages = ttk.Frame(nav)
+        pages.pack(fill='x')
+        ttk.Button(pages, text='‹', style='Compact.TButton', width=2, command=lambda: self.navigate(-1)).pack(side='left')
+        self.page_entry = ttk.Entry(pages, textvariable=self.page_text, width=4, justify='center')
+        self.page_entry.pack(side='left', padx=3)
         self.page_entry.bind('<Return>', lambda e: self.go_page())
-        self.page_count = ttk.Label(nav, text='/ — 页')
-        self.page_count.pack(side='left', padx=(0, 10))
-        ttk.Button(nav, text='›', style='Compact.TButton', width=3, command=lambda: self.navigate(1)).pack(side='left')
+        self.page_count = ttk.Label(pages, text='/ — 页')
+        self.page_count.pack(side='left', padx=(0, 3))
+        ttk.Button(pages, text='›', style='Compact.TButton', width=2, command=lambda: self.navigate(1)).pack(side='right')
         self.title_label = ttk.Label(nav, text='本地阅读 · 自动记忆进度', foreground='#617087')
         zoom = ttk.Combobox(nav, textvariable=self.zoom_text, width=10, state='readonly',
                            values=['适合宽度', '50%', '75%', '100%', '125%', '150%', '200%', '300%'])
-        zoom.pack(side='right')
+        zoom.pack(fill='x', pady=5)
         zoom.bind('<<ComboboxSelected>>', lambda e: self.change_zoom())
+        ttk.Button(nav, text='导出标注 PDF', style='Compact.TButton', command=self.export).pack(fill='x')
+        save_row = ttk.Frame(nav)
+        save_row.pack(fill='x', pady=(3, 0))
+        ttk.Button(save_row, text='保存 PDF', style='Compact.TButton', command=self.save_pdf_content).pack(side='left', expand=True, fill='x')
+        ttk.Button(save_row, text='另存 PDF', style='Compact.TButton', command=lambda: self.save_pdf_content(True)).pack(side='left', expand=True, fill='x')
         area = ttk.Frame(self.root)
         area.pack(fill='both', expand=True)
         self.canvas = tk.Canvas(area, bg='#e9edf3', highlightthickness=0, yscrollincrement=1)
@@ -164,9 +181,12 @@ class Reader(ContinuousView):
         footer.pack(fill='x')
         ttk.Label(footer, textvariable=self.status, foreground='#536176').pack(side='left')
         ttk.Label(footer, text='空格 + 左键标注 · Alt + 左键擦除 · Ctrl+Z 撤销', foreground='#7d899a').pack(side='right')
-        self.annotation_button = ttk.Button(self.root, text='标注 ▾', style='Compact.TButton', width=6, command=self.toggle_toolbar)
+        self.annotation_button = ttk.Button(self.root, text='标注 ▾', style='Compact.TButton', width=6, command=self.show_toolbar)
         self.annotation_button.place(relx=1, x=-64, y=12, anchor='ne')
         self.annotation_button.lift()
+        self.annotation_button.bind('<Enter>', self.show_toolbar)
+        self.annotation_button.bind('<Leave>', self.schedule_toolbar_hide)
+        self.root.bind('<Leave>', self.schedule_toolbar_hide, add='+')
         self.help_button = ttk.Button(self.root, text='?', style='Compact.TButton', width=2,
                                       command=self.toggle_shortcuts)
         self.help_button.place(relx=1, x=-26, y=12, anchor='ne')
@@ -177,7 +197,9 @@ class Reader(ContinuousView):
         shortcuts = [
             ('画线标注', '空格 + 左键拖动'),
             ('局部擦除', 'Alt + 左键拖动'),
+            ('矩形 / 圆形 / 椭圆', '选中工具后左键拖动'),
             ('输入文字', '左右键同时按下'),
+            ('直接修改原文', '阅读模式双击文字'),
             ('保存文字 / 换行', 'Enter / Shift + Enter'),
             ('取消文字', 'Esc'),
             ('撤销 / 重做', 'Ctrl + Z / Ctrl + Y'),
@@ -194,6 +216,7 @@ class Reader(ContinuousView):
         ttk.Label(self.shortcuts_panel, text='画线、擦除：松开任意一个键即结束。', foreground='#617087').grid(
             row=len(shortcuts)+1, column=0, columnspan=2, sticky='w', pady=(10, 0))
         self.canvas.bind('<ButtonPress-1>', self.pointer_down)
+        self.canvas.bind('<Double-Button-1>', self.direct_edit)
         self.canvas.bind('<B1-Motion>', self.pointer_move)
         self.canvas.bind('<ButtonRelease-1>', self.pointer_up)
         self.canvas.bind('<ButtonPress-3>', self.right_down)
@@ -242,6 +265,19 @@ class Reader(ContinuousView):
             self.annotation_button.configure(text='标注 ▴')
             self.annotation_button.lift()
         self.canvas.focus_set()
+
+    def show_toolbar(self, event=None):
+        if self.left_held or self.space_held or self.alt_held:
+            return
+        if self.toolbar_hide_job:
+            self.root.after_cancel(self.toolbar_hide_job)
+            self.toolbar_hide_job = None
+        self.shortcuts_panel.place_forget()
+        self.toolbar_visible = True
+        self.toolbar.place(relx=1, x=-26, y=44, anchor='ne')
+        self.toolbar.lift()
+        self.annotation_button.configure(text='标注 ▴')
+        self.annotation_button.lift()
 
     def toggle_shortcuts(self):
         if self.shortcuts_panel.winfo_ismapped():
@@ -311,7 +347,7 @@ class Reader(ContinuousView):
         self.space_held = False
         self.drag_cancelled = self.left_held
         self.finish_stroke()
-        self.canvas.configure(cursor={'hand': 'hand2', 'pen': 'crosshair', 'erase': 'circle'}[self.tool.get()])
+        self.canvas.configure(cursor={'hand': 'hand2', 'content': 'xterm', 'pen': 'crosshair', 'rect': 'crosshair', 'circle': 'crosshair', 'ellipse': 'crosshair', 'erase': 'circle'}[self.tool.get()])
         self.schedule_save()
         return 'break'
 
@@ -324,6 +360,7 @@ class Reader(ContinuousView):
         self.drag_cancelled = True
 
     def begin_stroke(self, point):
+        self.stroke_kind = 'ink'
         self.stroke_page = self.page
         self.points = [[point[0]/self.image_width, point[1]/self.image_height]]
         self.segment_start = point
@@ -397,6 +434,8 @@ class Reader(ContinuousView):
     def open_document(self, path):
         if not self.finish_text():
             return False
+        if not self.confirm_content_changes():
+            return False
         self.alt_up()
         self.stop_scroll()
         self.space_up()
@@ -428,7 +467,9 @@ class Reader(ContinuousView):
             return False
         if self.doc:
             self.doc.close()
+        self.reset_content_editor()
         self.doc, self.path, self.key = candidate, path, key
+        self.source_stamp = (Path(path).stat().st_mtime_ns, Path(path).stat().st_size)
         self.password, self.page_sizes = password, sizes
         self.page = max(0, min(state.get('page', 0), self.doc.page_count - 1))
         self.zoom = state.get('zoom', 'fit')
@@ -466,13 +507,19 @@ class Reader(ContinuousView):
             return self.blackboard_erase(event)
         if self.space_held:
             return self.space_motion(event)
+        if self.tool.get() == 'content':
+            self.left_held = False
+            return self.edit_content_at(event)
         if self.tool.get() == 'hand':
             self.stop_scroll()
             self.canvas.scan_mark(event.x, event.y)
-        elif self.tool.get() == 'pen':
+        elif self.tool.get() in ('pen', 'rect', 'circle', 'ellipse'):
+            self.stop_scroll()
             point = self.canvas_point(event)
             if self.inside(point):
                 self.begin_stroke(point)
+                if self.tool.get() != 'pen':
+                    self.stroke_kind = self.tool.get()
         else:
             self.erase_at(event)
 
@@ -489,12 +536,38 @@ class Reader(ContinuousView):
             self.schedule_save()
         elif self.tool.get() == 'erase':
             self.erase_at(event)
+        elif self.points and self.stroke_kind in ('rect', 'circle', 'ellipse'):
+            self.update_shape(event)
         elif self.points:
             point = self.canvas_point(event)
             if self.points:
                 self.extend_stroke(point)
             elif self.inside(point):
                 self.begin_stroke(point)
+
+    def update_shape(self, event):
+        ox, oy = self.origin
+        ax, ay = self.segment_start
+        bx = max(0, min(self.image_width, self.canvas.canvasx(event.x)-ox))
+        by = max(0, min(self.image_height, self.canvas.canvasy(event.y)-oy))
+        if self.stroke_kind == 'circle':
+            radius = min(math.hypot(bx-ax, by-ay), ax, ay,
+                         self.image_width-ax, self.image_height-ay)
+            x0, x1 = ax-radius, ax+radius
+            y0, y1 = ay-radius, ay+radius
+        else:
+            x0, x1 = sorted((ax, bx))
+            y0, y1 = sorted((ay, by))
+        if self.stroke_kind == 'rect':
+            outline = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+        else:
+            outline = [((x0+x1)/2+(x1-x0)/2*math.cos(i*math.tau/128),
+                        (y0+y1)/2+(y1-y0)/2*math.sin(i*math.tau/128)) for i in range(129)]
+        self.points = [[x/self.image_width, y/self.image_height] for x, y in outline]
+        self.canvas.delete('draft')
+        draw = self.canvas.create_rectangle if self.stroke_kind == 'rect' else self.canvas.create_oval
+        draw(ox+x0, oy+y0, ox+x1, oy+y1, outline=self.ink_color,
+             width=max(1, float(self.ink_width.get())*self.scale), tags='draft')
 
     def extend_stroke(self, point):
         point = (max(0, min(self.image_width, point[0])), max(0, min(self.image_height, point[1])))
@@ -638,6 +711,15 @@ class Reader(ContinuousView):
         if not self.points:
             return
         stroke = new_stroke(self.stroke_page, self.points, self.ink_color, float(self.ink_width.get()))
+        if self.stroke_kind in ('rect', 'circle', 'ellipse'):
+            xs, ys = zip(*self.points)
+            box = [min(xs), min(ys), max(xs)-min(xs), max(ys)-min(ys)]
+            if box[2]*self.image_width < 2 or box[3]*self.image_height < 2:
+                self.points = []
+                self.stroke_page = None
+                self.canvas.delete('draft')
+                return
+            stroke.update(type=self.stroke_kind, box=box)
         try:
             self.library.put(self.key, stroke)
         except Exception as error:
@@ -650,6 +732,10 @@ class Reader(ContinuousView):
         self.record('add', stroke)
         self.draw_strokes()
         self.status.set('笔迹已自动保存 · 导出 PDF 可在其他软件中查看')
+        if stroke.get('type') in ('rect', 'circle', 'ellipse'):
+            self.tool.set('hand')
+            self.canvas.configure(cursor='hand2')
+            self.status.set('形状已保存 · 已恢复阅读模式')
 
     def erase_at(self, event):
         if not self.show_ink.get():
@@ -693,7 +779,7 @@ class Reader(ContinuousView):
         self.alt_held = False
         self.drag_cancelled = self.left_held
         self.canvas.delete('eraser-cursor')
-        self.canvas.configure(cursor={'hand': 'hand2', 'pen': 'crosshair', 'erase': 'circle'}[self.tool.get()])
+        self.canvas.configure(cursor={'hand': 'hand2', 'content': 'xterm', 'pen': 'crosshair', 'rect': 'crosshair', 'circle': 'crosshair', 'ellipse': 'crosshair', 'erase': 'circle'}[self.tool.get()])
         return 'break'
 
     def show_eraser(self, event):
@@ -758,11 +844,15 @@ class Reader(ContinuousView):
         self.history_buttons()
 
     def undo(self):
+        if not self.finish_text():
+            return
         self.finish_erase()
         self.finish_stroke()
         self.replay(self.undo_stack, self.redo_stack, reverse=True)
 
     def redo(self):
+        if not self.finish_text():
+            return
         self.finish_erase()
         self.replay(self.redo_stack, self.undo_stack, reverse=False)
 
@@ -770,6 +860,16 @@ class Reader(ContinuousView):
         if not source:
             return
         operation, stroke = source[-1]
+        if operation == 'content':
+            try:
+                self.switch_snapshot(stroke['before'] if reverse else stroke['after'])
+            except Exception as error:
+                messagebox.showerror('撤销修改失败', str(error), parent=self.root)
+                return
+            target.append(source.pop())
+            self.history_buttons()
+            self.status.set('已撤销原文修改' if reverse else '已重做原文修改')
+            return
         if operation == 'replace':
             removed, added = (stroke['after'], stroke['before']) if reverse else (stroke['before'], stroke['after'])
             try:
@@ -816,13 +916,19 @@ class Reader(ContinuousView):
         self.tool_changed()
 
     def tool_changed(self):
+        if not self.finish_text():
+            return
         self.finish_stroke()
         if self.tool.get() != 'hand' and not self.show_ink.get():
             self.show_ink.set(True)
             self.render()
-        self.canvas.configure(cursor={'hand': 'hand2', 'pen': 'crosshair', 'erase': 'circle'}[self.tool.get()])
+        self.canvas.configure(cursor={'hand': 'hand2', 'content': 'xterm', 'pen': 'crosshair', 'rect': 'crosshair', 'circle': 'crosshair', 'ellipse': 'crosshair', 'erase': 'circle'}[self.tool.get()])
         self.status.set({'hand': '阅读模式 · 拖动页面，滚轮滚动',
                          'pen': '画笔模式 · 按住鼠标左键自由圈画，松开自动保存',
+                         'content': '编辑原文 · 点击文字修改，点击图片替换或删除 · Ctrl+S 保存 PDF',
+                         'rect': '矩形 · 左键拖动确定大小，松开保存',
+                         'circle': '圆形 · 按下确定圆心，拖动调整半径，松开保存',
+                         'ellipse': '椭圆 · 左键拖动确定大小，松开保存',
                          'erase': '擦除模式 · 点击或划过笔迹，擦除本软件添加的一整笔'}[self.tool.get()])
 
     def toggle_ink(self):
@@ -935,12 +1041,19 @@ class Reader(ContinuousView):
         return True
 
     def save_now(self):
+        if not self.finish_text():
+            return
+        if self.content_dirty():
+            self.save_pdf_content()
+            return
         self.finish_stroke()
         if self.save_state():
             self.status.set('阅读位置和笔迹已保存到本机 · 分享请使用右上角“导出带标注 PDF”')
 
     def export(self):
         if not self.doc:
+            return
+        if not self.finish_text():
             return
         self.finish_stroke()
         if self.points:
@@ -963,6 +1076,8 @@ class Reader(ContinuousView):
     def close(self):
         if not self.finish_text():
             return
+        if not self.confirm_content_changes():
+            return
         self.alt_up()
         self.space_up()
         self.finish_stroke()
@@ -976,6 +1091,9 @@ class Reader(ContinuousView):
             self.doc.close()
         if self.renderer:
             self.renderer.close()
+            self.renderer = None
+        if self.content_temp:
+            self.content_temp.cleanup()
         self.library.close()
         self.root.destroy()
 

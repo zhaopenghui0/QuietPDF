@@ -77,6 +77,23 @@ class Library:
     def close(self):
         self.db.close()
 
+    def transfer_document(self, old, new, path, copy=False):
+        if old == new:
+            return
+        state = self.state(old)
+        strokes = self.strokes(old)
+        with self.db:
+            if copy:
+                for stroke in strokes:
+                    stroke['id'] = uuid.uuid4().hex
+                    self.db.execute('INSERT INTO strokes VALUES(?,?,?,?)',
+                                    (stroke['id'], new, stroke['page'], json.dumps(stroke)))
+            else:
+                self.db.execute('UPDATE strokes SET doc=? WHERE doc=?', (new, old))
+                self.db.execute('DELETE FROM documents WHERE key=?', (old,))
+            self.db.execute('INSERT OR REPLACE INTO documents(key,path,state) VALUES(?,?,?)',
+                            (new, path, json.dumps(state)))
+
     def replace_strokes(self, key, removed, added):
         with self.db:
             self.db.executemany('DELETE FROM strokes WHERE id=?', [(s['id'],) for s in removed])
@@ -218,7 +235,12 @@ def export_pdf(doc, strokes, destination):
                           for x, y in stroke['points']]
                 if len(points) == 1:
                     points.append(points[0] + fitz.Point(0.1, 0.1))
-                annotation = page.add_ink_annot([[tuple(point) for point in points]])
+                if stroke.get('type') in ('rect', 'circle', 'ellipse'):
+                    x, y, w, h = stroke['box']
+                    box = fitz.Rect(x*rect.width, y*rect.height, (x+w)*rect.width, (y+h)*rect.height) * page.derotation_matrix
+                    annotation = page.add_rect_annot(box) if stroke['type'] == 'rect' else page.add_circle_annot(box)
+                else:
+                    annotation = page.add_ink_annot([[tuple(point) for point in points]])
                 color = tuple(int(stroke['color'][i:i+2], 16) / 255 for i in (1, 3, 5))
                 annotation.set_colors(stroke=color)
                 annotation.set_border(width=stroke['width'])

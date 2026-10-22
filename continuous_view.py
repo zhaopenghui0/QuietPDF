@@ -132,7 +132,7 @@ class ContinuousView:
         for page in priority:
             tile = self.tiles.get(page)
             if tile and tile['photo'] is None and not tile['error']:
-                self.renderer.submit(dict(token=self.raster_token, key=self.key, path=self.path,
+                self.renderer.submit(dict(token=self.raster_token, key=(self.key, self.render_path), path=self.render_path or self.path,
                     password=self.password, page=page, zoom=self.zoom,
                     width=self.layout_signature[2], annotations=self.show_ink.get()))
                 return
@@ -176,6 +176,13 @@ class ContinuousView:
             coords = [(geom['x']+x*geom['width'], geom['y']+y*geom['height']) for x, y in stroke['points']]
             width = max(1, stroke['width']*geom['scale'])
             tags = ('ink', f'ink-{page}')
+            if stroke.get('type') in ('rect', 'circle', 'ellipse'):
+                x, y, w, h = stroke['box']
+                draw = self.canvas.create_rectangle if stroke['type'] == 'rect' else self.canvas.create_oval
+                draw(geom['x']+x*geom['width'], geom['y']+y*geom['height'],
+                     geom['x']+(x+w)*geom['width'], geom['y']+(y+h)*geom['height'],
+                     outline=stroke['color'], width=width, tags=tags)
+                continue
             if stroke.get('type') == 'text':
                 x, y, w, h = stroke['box']
                 self.canvas.create_text(geom['x']+x*geom['width'], geom['y']+y*geom['height'],
